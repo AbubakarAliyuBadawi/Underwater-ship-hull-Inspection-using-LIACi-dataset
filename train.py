@@ -1,10 +1,5 @@
-########################################################
-#                                                      #
-#       author: omitted for anonymous submission       #
-#                                                      #
-#     credits and copyright coming upon publication    #
-#                                                      #
-########################################################
+# train.py 
+# location (/cluster/home/abubakb/ContMAV/train.py)
 
 import argparse
 from datetime import datetime
@@ -15,7 +10,15 @@ import sys
 import time
 import warnings
 import matplotlib.pyplot as plt
+import pickle
 
+import time
+import numpy as np
+import torch
+import torch.nn.functional as F
+import os
+
+from sklearn.decomposition import PCA
 import numpy as np
 from tqdm import tqdm
 
@@ -225,6 +228,7 @@ def train_one_epoch(
     lr_scheduler,
     writer,
     debug_mode=False,
+    ckpt_dir=None
 ):
     lr_scheduler.step(epoch)
     samples_of_epoch = 0
@@ -267,20 +271,27 @@ def train_one_epoch(
         loss_objectosphere = torch.tensor(0.0)
         loss_ows = torch.tensor(0.0)
         loss_con = torch.tensor(0.0)
-        total_loss = 0.9 * loss_segmentation
+        #total_loss = 0.9 * loss_segmentation
         label = sample["label"].long().cuda() - 1
         label[label < 0] = 255
+
+        total_loss = 0.9 * loss_segmentation
 
         if loss_obj is not None:
             label_ow = label.clone().cuda().to(torch.uint8)
             loss_objectosphere = loss_obj(ow_res, label_ow)
-            total_loss += 0.5 * loss_objectosphere
+            #print(f"Obj loss: {loss_objectosphere}, shape: {ow_res.shape}")
+            total_loss += 0.5 * loss_objectosphere  # Reduced from 0.5
+
         if loss_mav is not None:
             loss_ows = loss_mav(pred_scales, label, is_train=True)
-            total_loss += 0.1 * loss_ows
-        if loss_contrastive is not None:
+            #print(f"MAV loss: {loss_ows}, pred shape: {pred_scales.shape}")
+            total_loss += 0.1 * loss_ows  # Keep same
+
+        if loss_contrastive is not None and mavs is not None:
             loss_con = loss_contrastive(mavs, ow_res, label, epoch)
-            total_loss += 0.5 * loss_con
+            #print(f"Con loss: {loss_con}, mavs shape: {mavs.shape}")
+            total_loss += 0.5 * loss_con  # Reduced from 0.5
 
         total_loss.backward()
         optimizer.step()
@@ -335,7 +346,7 @@ def train_one_epoch(
         return mean, var
     else:
         return {}, {}
-
+    
 
 def validate(
     model,
@@ -347,107 +358,111 @@ def validate(
     loss_function_valid_unweighted=None,
     add_log_key="",
     debug_mode=False,
-    classes=19,
+    classes=11,
 ):
+    
+    #print(f"Total validation samples: {len(valid_loader.dataset)}")
+    #print(f"Validation batch size: {valid_loader.batch_size}")
+    #print(f"Expected validation iterations: {len(valid_loader)}")
     valid_split = valid_loader.dataset.split + add_log_key
-
-    # we want to track how long each part of the validation takes
-    forward_time = 0
-    copy_to_gpu_time = 0
-
-    # set model to eval mode
     model.eval()
-
-    # we want to store miou and ious for each camera
-    miou = dict()
-    ious = dict()
-
+    
     loss_function_valid, loss_obj, loss_mav, loss_contrastive = val_loss
-
-    # reset loss (of last validation) to zero
-    loss_function_valid.reset_loss()
-
+    
+    # Reset losses
+    if loss_function_valid is not None:
+        loss_function_valid.reset_loss()
     if loss_function_valid_unweighted is not None:
         loss_function_valid_unweighted.reset_loss()
-
+        
+    # Initialize IoU metric
     compute_iou = IoU(
-        task="multiclass", num_classes=classes, average="none", ignore_index=255
+        task="multiclass", 
+        num_classes=classes, 
+        average="none", 
+        ignore_index=255
     ).to(device)
-
+    
+    # Get MAVs if using contrastive loss
     mavs = None
-    if loss_contrastive is not None:
-        mavs = loss_mav.read()
-
+    if loss_contrastive is not None and loss_mav is not None:
+        mavs = loss_mav.read().to(device)
+    
     total_loss_obj = []
     total_loss_mav = []
     total_loss_con = []
-    # validate each camera after another as all images of one camera have
-    # the same resolution and can be resized together to the ground truth
-    # segmentation size.
-
-    for i, sample in enumerate(tqdm(valid_loader, desc="Valid step")):
-        # copy the data to gpu
-        image = sample["image"].to(device)
-
-        if not device.type == "cpu":
-            torch.cuda.synchronize()
-
-        # forward pass
+    
+    try:
         with torch.no_grad():
-            prediction_ss, prediction_ow = model(image)
-
-            if not device.type == "cpu":
-                torch.cuda.synchronize()
-
-            target = sample["label"].long().cuda() - 1
-            target[target == -1] = 255
-            compute_iou.update(prediction_ss, target.cuda())
-
-            # compute valid loss
-            loss_function_valid.add_loss_of_batch(
-                prediction_ss, sample["label"].to(device)
-            )
-
-            loss_objectosphere = torch.tensor(0)
-            loss_ows = torch.tensor(0)
-            loss_con = torch.tensor(0)
-            if loss_obj is not None:
-                target_obj = sample["label"]
-                target_obj[target_obj == 16] = 255
-                target_obj[target_obj == 17] = 255
-                target_obj[target_obj == 18] = 255
-                loss_objectosphere = loss_obj(prediction_ow, sample["label"])
-            total_loss_obj.append(loss_objectosphere.cpu().detach().numpy())
-            if loss_mav is not None:
-                loss_ows = loss_mav(prediction_ss, target.cuda(), is_train=False)
-            total_loss_mav.append(loss_ows.cpu().detach().numpy())
-            if loss_contrastive is not None:
-                loss_con = loss_contrastive(mavs, prediction_ow, target, epoch)
-            total_loss_con.append(loss_con.cpu().detach().numpy())
-
-            if debug_mode:
-                # only one batch while debugging
-                break
-
-    ious = compute_iou.compute().detach().cpu()
-    miou = ious.mean()
-
-    total_loss = (
-        loss_function_valid.compute_whole_loss()
-        + np.mean(total_loss_obj)
-        + np.mean(total_loss_mav)
-        + np.mean(total_loss_con)
-    )
-    writer.add_scalar("Loss/val", total_loss, epoch)
-    writer.add_scalar("Metrics/miou", miou, epoch)
-    for i, iou in enumerate(ious):
-        writer.add_scalar(
-            "Class_metrics/iou_{}".format(i),
-            torch.mean(iou),
-            epoch,
-        )
-
-    return miou
+            for i, sample in enumerate(tqdm(valid_loader, desc="Valid step")):
+                # Move data to device
+                image = sample["image"].to(device)
+                target = sample["label"].long().to(device)
+                
+                # Get predictions
+                prediction_ss, prediction_ow = model(image)
+                
+                # Prepare target for loss calculation
+                target_ss = target.clone()
+                target_ss[target_ss == 255] = 0
+                
+                # Calculate segmentation loss
+                if loss_function_valid is not None:
+                    loss_function_valid.add_loss_of_batch(prediction_ss, target_ss)
+                
+                # Calculate IoU
+                target_iou = target - 1
+                target_iou[target_iou == -1] = 255
+                compute_iou.update(prediction_ss.argmax(dim=1), target_iou)
+                
+                # Calculate objectosphere loss if enabled
+                if loss_obj is not None:
+                    target_obj = target.clone()
+                    target_obj = target_obj.to(torch.uint8)
+                    loss_objectosphere = loss_obj(prediction_ow, target_obj)
+                    total_loss_obj.append(loss_objectosphere.item())
+                
+                # Calculate MAV loss if enabled
+                if loss_mav is not None:
+                    loss_ows = loss_mav(prediction_ss, target_iou, is_train=False)
+                    total_loss_mav.append(loss_ows.item())
+                
+                # Calculate contrastive loss if enabled
+                if loss_contrastive is not None and mavs is not None:
+                    loss_con = loss_contrastive(mavs, prediction_ow, target_iou, epoch)
+                    total_loss_con.append(loss_con.item())
+                
+                if debug_mode and i >= 2:
+                    break
+                    
+        # Compute final metrics
+        ious = compute_iou.compute()
+        miou = ious.mean().item()
+        
+        # Calculate total validation loss
+        seg_loss = loss_function_valid.compute_whole_loss() if loss_function_valid is not None else 0
+        obj_loss = np.mean(total_loss_obj) if total_loss_obj else 0
+        mav_loss = np.mean(total_loss_mav) if total_loss_mav else 0
+        con_loss = np.mean(total_loss_con) if total_loss_con else 0
+        total_loss = seg_loss + obj_loss + mav_loss + con_loss
+        
+        # Log metrics
+        writer.add_scalar("Loss/val", total_loss, epoch)
+        writer.add_scalar("Metrics/miou", miou, epoch)
+        for i, iou in enumerate(ious):
+            writer.add_scalar(f"Class_metrics/iou_{i}", iou.item(), epoch)
+        
+        #print(f"\nValidation Epoch {epoch}")
+        #print(f"mIoU: {miou:.4f}")
+        #print(f"Loss: {total_loss:.4f} (Seg: {seg_loss:.4f}, Obj: {obj_loss:.4f}, MAV: {mav_loss:.4f}, Con: {con_loss:.4f})")
+        
+        return miou
+        
+    except Exception as e:
+        print(f"Validation error occurred: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return 0.0
 
 
 def test_ow(
@@ -457,7 +472,7 @@ def test_ow(
     val_loss,
     epoch,
     writer,
-    classes=19,
+    classes=11,
     mean=None,
     var=None,
 ):
@@ -546,10 +561,10 @@ def contrastive_inference(predictions, radius=1.0):
 
 
 def semantic_inference(predictions, mavs, var):
-    stds = torch.vstack(tuple(var.values())).cpu()  # 19x19
+    stds = torch.vstack(tuple(var.values())).cpu()  # 11x11 (instead of 19x19)
     d_pred = (
         predictions[:, None, ...] - mavs[None, :, :, None, None]
-    )  # [8,1,19,h,w] - [1,19,19,1,1]
+    )  # [8,1,11,h,w] - [1,11,11,1,1]
     d_pred_ = d_pred / (stds[None, :, :, None, None] + 1e-8)
     scores = torch.exp(-torch.einsum("bcfhw,bcfhw->bchw", d_pred_, d_pred) / 2)
     best = scores.max(dim=1)

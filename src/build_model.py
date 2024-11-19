@@ -1,19 +1,11 @@
-########################################################
-#                                                      #
-#       author: omitted for anonymous submission       #
-#                                                      #
-#     credits and copyright coming upon publication    #
-#                                                      #
-########################################################
+# # build_model.py
+# # location (/cluster/home/abubakb/ContMAV/src/build_model.py)
 
 import torch
 from torch import nn
-
 from src.models.model_one_modality import OWSNetwork
 from src.models.resnet import ResNet
-
 from torchsummary import summary
-
 
 def build_model(args, n_classes):
     if not args.pretrained_on_imagenet or args.last_ckpt:
@@ -24,9 +16,7 @@ def build_model(args, n_classes):
     # set the number of channels in the encoder and for the
     # fused encoder features
     if "decreasing" in args.decoder_channels_mode:
-        if args.decoder_channels_mode == "decreasing":
-            channels_decoder = [512, 256, 128]
-
+        channels_decoder = [512, 256, 128]
         print(
             "Notice: argument --channels_decoder is ignored when "
             "--decoder_chanels_mode decreasing is set."
@@ -53,13 +43,14 @@ def build_model(args, n_classes):
         input_channels=input_channels,
         encoder_decoder_fusion=args.encoder_decoder_fusion,
         context_module=args.context_module,
-        num_classes=n_classes,
+        num_classes=n_classes,  # This will now be 11 from your args
         pretrained_dir=args.pretrained_dir,
         nr_decoder_blocks=nr_decoder_blocks,
         channels_decoder=channels_decoder,
         upsampling=args.upsampling,
     )
 
+    # Device setup
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
     else:
@@ -69,34 +60,25 @@ def build_model(args, n_classes):
     print("\n\n")
 
     model.to(device)
-    # print(model)
-    # summary(model)
-
     print("Number of parameters:", summary(model, verbose=False).total_params)
     print("\n\n")
+
+    # He initialization
     if args.he_init:
         module_list = []
-
-        # first filter out the already pretrained encoder(s)
         for c in model.children():
             if pretrained_on_imagenet and isinstance(c, ResNet):
-                # already initialized
                 continue
             for m in c.modules():
                 module_list.append(m)
 
-        # iterate over all the other modules
-        # output layers, layers followed by sigmoid (in SE block) and
-        # depthwise convolutions (currently only used in learned upsampling)
-        # are not initialized with He method
         for i, m in enumerate(module_list):
             if isinstance(m, (nn.Conv2d, nn.Conv1d, nn.Linear)):
-                if (
-                    m.out_channels == n_classes
-                    or m.out_channels == 19
-                    or isinstance(module_list[i + 1], nn.Sigmoid)
-                    or m.groups == m.in_channels
-                ):
+                # Safe way to check next module
+                next_module = module_list[i + 1] if i + 1 < len(module_list) else None
+                if (m.out_channels == n_classes or 
+                    (next_module is not None and isinstance(next_module, nn.Sigmoid)) or
+                    (hasattr(m, 'groups') and m.groups == m.in_channels)):
                     continue
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
@@ -104,6 +86,7 @@ def build_model(args, n_classes):
                 nn.init.constant_(m.bias, 0)
         print("Applied He init.")
 
+    # Load pretrained weights if specified
     if args.finetune is not None:
         checkpoint = torch.load(args.finetune)
         model.load_state_dict(checkpoint["state_dict"])

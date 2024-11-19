@@ -1,11 +1,5 @@
-########################################################
-#                                                      #
-#       author: omitted for anonymous submission       #
-#                                                      #
-#     credits and copyright coming upon publication    #
-#                                                      #
-########################################################
-
+# utils.py
+# location (/cluster/home/abubakb/ContMAV/src/utils.py)
 
 import os
 import sys
@@ -18,58 +12,59 @@ import torch.nn.functional as F
 
 
 class ContrastiveLoss(nn.Module):
-    def __init__(self, n_classes=19):
+    def __init__(self, n_classes=11):
         super().__init__()
         self.n_classes = n_classes
-
+        self.feature_dim = 11
     def forward(self, emb_k, emb_q, labels, epoch, tau=0.1):
-        """
-        emb_k: the feature bank with the aggregated embeddings over the iterations
-        emb_q: the embeddings for the current iteration
-        labels: the correspondent class labels for each sample in emb_q
-        """
+        #print(f"emb_k shape: {emb_k.shape}")
+        #print(f"emb_q shape: {emb_q.shape}")
+        #print(f"labels shape: {labels.shape}")
+
         if epoch:
             total_loss = torch.tensor(0.0).cuda()
-            assert (
-                emb_q.shape[0] == labels.shape[0]
-            ), "mismatch on emb_q and labels shapes!"
-            emb_k = F.normalize(emb_k, dim=-1)
-            emb_q = F.normalize(emb_q, dim=1)
+            assert emb_q.shape[0] == labels.shape[0], "mismatch on emb_q and labels shapes!"
+            
+            # Ensure emb_k has correct shape [n_classes, feature_dim]
+            if emb_k.shape[1] != self.feature_dim:
+                # Add a reshape or projection to match feature dimensions
+                emb_k = F.normalize(emb_k[:, :self.feature_dim] if emb_k.shape[1] > self.feature_dim 
+                                  else torch.cat([emb_k, torch.zeros(emb_k.shape[0], self.feature_dim - emb_k.shape[1]).cuda()], dim=1), 
+                                  dim=-1)
+
+            # Now emb_k should be [11, 19]
+            emb_q = F.normalize(emb_q, dim=1)  # [batch, 19, H, W]
 
             for i, emb in enumerate(emb_q):
                 label = labels[i]
-                if not (255 in label.unique() and len(label.unique()) == 1):
-                    label[label == 255] = self.n_classes
-                    label_sq = torch.unique(label, return_inverse=True)[1]
-                    oh_label = (F.one_hot(label_sq)).unsqueeze(-2)  # one hot labels
-                    count = oh_label.view(-1, oh_label.shape[-1]).sum(
-                        dim=0
-                    )  # num of pixels per cl
-                    pred = emb.permute(1, 2, 0).unsqueeze(-1)
-                    oh_pred = (
-                        pred * oh_label
-                    )  # (H, W, Nc, Ncp) Ncp num classes present in the label
-                    oh_pred_flatten = oh_pred.view(
-                        oh_pred.shape[0] * oh_pred.shape[1],
-                        oh_pred.shape[2],
-                        oh_pred.shape[3],
-                    )
-                    res_raw = oh_pred_flatten.sum(dim=0) / count  # avg feat per class
-                    res_new = (res_raw[~res_raw.isnan()]).view(
-                        -1, self.n_classes
-                    )  # filter out nans given by intermediate classes (present because of oh)
-                    label_list = label.unique()
-                    if self.n_classes in label_list:
-                        label_list = label_list[:-1]
-                        res_new = res_new[:-1, :]
+                if not (0 in label.unique() and len(label.unique()) == 1):
+                    valid_labels = torch.tensor([l for l in label.unique() if l != 0]).cuda()
+                    if len(valid_labels) == 0:
+                        continue
 
-                    # temperature-scaled cosine similarity
-                    final = (res_new.cuda() @ emb_k.T.cuda()) / 0.1
+                    # Extract features for each valid label
+                    label_features = []
+                    for lbl in valid_labels:
+                        mask = (label == lbl)
+                        if mask.sum() == 0:
+                            continue
+                        # Average features for this class [19]
+                        class_features = emb[:, mask].mean(dim=1)
+                        label_features.append(class_features)
 
-                    loss = F.cross_entropy(final, label_list)
+                    if not label_features:
+                        continue
+
+                    # Stack features [num_valid_classes, 19]
+                    label_features = torch.stack(label_features)
+                    label_features = F.normalize(label_features, dim=1)
+
+                    # Compute similarity
+                    similarity = (label_features @ emb_k.T) / tau
+                    loss = F.cross_entropy(similarity, torch.arange(len(valid_labels)).cuda())
                     total_loss += loss
 
-            return total_loss / emb_q.shape[0]
+            return total_loss / emb_q.shape[0] if emb_q.shape[0] > 0 else torch.tensor(0.0).cuda()
 
         return torch.tensor(0).cuda()
 
@@ -80,22 +75,15 @@ class OWLoss(nn.Module):
         self.n_classes = n_classes
         self.hinged = hinged
         self.delta = delta
-        self.count = torch.zeros(self.n_classes).cuda()  # count for class
-        self.features = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
-        # See https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
-        # for implementation of Welford Alg.
+        self.count = torch.zeros(self.n_classes).cuda()
+        self.features = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
+        
+        # Welford's algorithm for computing running variance
         self.ex = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
-        self.ex2 = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
-        self.var = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
-
+        self.ex2 = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
+        self.var = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
+        
         self.criterion = torch.nn.L1Loss(reduction="none")
-
         self.previous_features = None
         self.previous_count = None
 
@@ -104,80 +92,114 @@ class OWLoss(nn.Module):
         sem_pred = torch.argmax(torch.softmax(logits, dim=1), dim=1)
         gt_labels = torch.unique(sem_gt).tolist()
         logits_permuted = logits.permute(0, 2, 3, 1)
+        
         for label in gt_labels:
-            if label == 255:
+            if label == 0:  # Skip void class
                 continue
+                
+            # Get true positives for current class
             sem_gt_current = sem_gt == label
             sem_pred_current = sem_pred == label
             tps_current = torch.logical_and(sem_gt_current, sem_pred_current)
+            
             if tps_current.sum() == 0:
                 continue
+                
+            # Get logits for true positive predictions
             logits_tps = logits_permuted[torch.where(tps_current == 1)]
-            # max_values = logits_tps[:, label].unsqueeze(1)
-            # logits_tps = logits_tps / max_values
+            
+            # Calculate mean activation vector
             avg_mav = torch.mean(logits_tps, dim=0)
             n_tps = logits_tps.shape[0]
-            # features is running mean for mav
-            self.features[label] = (
-                self.features[label] * self.count[label] + avg_mav * n_tps
-            )
-
-            self.ex[label] += (logits_tps).sum(dim=0)
-            self.ex2[label] += ((logits_tps) ** 2).sum(dim=0)
+            
+            # Update running mean
+            self.features[label] = (self.features[label] * self.count[label] + avg_mav * n_tps)
             self.count[label] += n_tps
-            self.features[label] /= self.count[label] + 1e-8
+            if self.count[label] > 0:
+                self.features[label] /= self.count[label]
+            
+            # Update variance statistics
+            centered_logits = logits_tps - avg_mav
+            self.ex[label] = torch.mean(centered_logits, dim=0)
+            self.ex2[label] = torch.mean(centered_logits ** 2, dim=0)
 
-    def forward(
-        self, logits: torch.Tensor, sem_gt: torch.Tensor, is_train: torch.bool
-    ) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, sem_gt: torch.Tensor, is_train: torch.bool) -> torch.Tensor:
         if is_train:
-            # update mav only at training time
             sem_gt = sem_gt.type(torch.uint8)
             self.cumulate(logits, sem_gt)
-        if self.previous_features == None:
+            
+        if self.previous_features is None:
             return torch.tensor(0.0).cuda()
+            
         gt_labels = torch.unique(sem_gt).tolist()
-
         logits_permuted = logits.permute(0, 2, 3, 1)
-
+        
         acc_loss = torch.tensor(0.0).cuda()
-        for label in gt_labels[:-1]:
-            mav = self.previous_features[label]
-            logs = logits_permuted[torch.where(sem_gt == label)]
-            mav = mav.expand(logs.shape[0], -1)
+        valid_labels = 0
+        
+        for label in gt_labels:
+            if label == 0:  # Skip void class
+                continue
+                
             if self.previous_count[label] > 0:
+                mav = self.previous_features[label]
+                logs = logits_permuted[torch.where(sem_gt == label)]
+                
+                if logs.shape[0] == 0:
+                    continue
+                    
+                mav = mav.expand(logs.shape[0], -1)
+                
+                # Calculate L1 loss
                 ew_l1 = self.criterion(logs, mav)
-                ew_l1 = ew_l1 / (self.var[label] + 1e-8)
+                
+                # Normalize by variance with safe division
+                var = self.var[label].clamp(min=1e-8)
+                ew_l1 = ew_l1 / var
+                
+                # Apply hinge if enabled
                 if self.hinged:
-                    ew_l1 = F.relu(ew_l1 - self.delta).sum(dim=1)
+                    ew_l1 = F.relu(ew_l1 - self.delta)
+                
                 acc_loss += ew_l1.mean()
-
-        return acc_loss
+                valid_labels += 1
+        
+        # Average loss over valid labels
+        if valid_labels > 0:
+            acc_loss = acc_loss / valid_labels
+            
+        return acc_loss.clamp(max=10.0)  # Prevent explosion
 
     def update(self):
         self.previous_features = self.features
         self.previous_count = self.count
+        
+        # Update variance using Welford's algorithm
         for c in self.var.keys():
-            self.var[c] = (self.ex2[c] - self.ex[c] ** 2 / (self.count[c] + 1e-8)) / (
-                self.count[c] + 1e-8
-            )
+            if self.count[c] > 0:
+                self.var[c] = (self.ex2[c] - self.ex[c] ** 2).clamp(min=1e-8)
 
-        # resetting for next epoch
-        self.count = torch.zeros(self.n_classes)  # count for class
-        self.features = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
+        # Reset statistics for next epoch
+        self.count = torch.zeros(self.n_classes).cuda()
+        self.features = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
         self.ex = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
-        self.ex2 = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
+        self.ex2 = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
 
         return self.previous_features, self.var
 
     def read(self):
-        mav_tensor = torch.zeros(self.n_classes, self.n_classes)
-        for key in self.previous_features.keys():
-            mav_tensor[key] = self.previous_features[key]
+        if self.previous_features is None:
+            return torch.zeros(self.n_classes, self.n_classes).cuda()
+        
+        # Get feature dimension from previous features
+        feature_dim = next(iter(self.previous_features.values())).shape[0]
+        #print(f"MAV feature dimension: {feature_dim}")
+        
+        mav_tensor = torch.zeros(self.n_classes, feature_dim).cuda()
+        for key in range(self.n_classes):
+            if key in self.previous_features and self.previous_count[key] > 0:
+                mav_tensor[key] = F.normalize(self.previous_features[key], dim=0)
+        
         return mav_tensor
 
 
@@ -187,8 +209,8 @@ class ObjectosphereLoss(nn.Module):
         self.sigma = sigma
 
     def forward(self, logits, sem_gt):
-        logits_unk = logits.permute(0, 2, 3, 1)[torch.where(sem_gt == 255)]
-        logits_kn = logits.permute(0, 2, 3, 1)[torch.where(sem_gt != 255)]
+        logits_unk = logits.permute(0, 2, 3, 1)[torch.where(sem_gt == 0)]
+        logits_kn = logits.permute(0, 2, 3, 1)[torch.where(sem_gt != 0)]
 
         if len(logits_unk):
             loss_unk = torch.linalg.norm(logits_unk, dim=1).mean()
@@ -298,9 +320,9 @@ def print_log(
     )
     for i, lr in enumerate(learning_rates):
         print_string += "   lr_{}: {:>6}".format(i, round(lr, 10))
-    print_string += "   Loss: {:0.6f}".format(loss.item())
-    print_string += "  [{:0.2f}s every {:>4} data]".format(time_inter, count_inter)
-    print(print_string, flush=True)
+        print_string += "   Loss: {:0.6f}".format(loss.item())
+        print_string += "  [{:0.2f}s every {:>4} data]".format(time_inter, count_inter)
+        print(print_string, flush=True)
 
 
 def save_ckpt(ckpt_dir, model, optimizer, epoch):

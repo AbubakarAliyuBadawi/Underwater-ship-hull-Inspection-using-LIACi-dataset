@@ -310,7 +310,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-#python visualize_features.py --load_weights /cluster/home/abubakb/ContMAV_3/results_closeworld/cityscapes/LIACi-03-closed-world-02/05_11_2024-16_42_20-773451/epoch_419.pth --dataset_dir /cluster/home/abubakb/final_dataset --batch_size 4
-
-#--load_weights /cluster/home/abubakb/ContMAV/results/cityscapes/CVPR-OPEN-9/10_11_2024-01_20_29-464714/epoch_1999.pth --dataset_dir /cluster/home/abubakb/ContMAV/leftImg8bit_trainvaltest_real --batch_size 4

@@ -1,7 +1,3 @@
-# prepare_data.py
-# location (/cluster/home/abubakb/ContMAV/src/prepare_data.py)
-
-
 from torch.utils.data import DataLoader
 from src import preprocessing
 from src.datasets import Cityscapes

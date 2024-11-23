@@ -152,6 +152,3 @@ if __name__ == "__main__":
     
     process_dataset(args.rgb_dir, args.mask_dir, args.output_dir, 
                    target_size=(args.height, args.width))
-    
-
-#    python labels.py /cluster/home/abubakb/LIACi_dataset_pretty/images /cluster/home/abubakb/LIACi_dataset_pretty/masks /cluster/home/abubakb/final_dataset

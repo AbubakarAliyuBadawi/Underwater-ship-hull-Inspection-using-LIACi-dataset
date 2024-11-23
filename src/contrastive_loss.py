@@ -1,6 +1,3 @@
-# contrastive_loss.py
-# /cluster/home/abubakb/ContMAV/src/contrastive_loss.py
-
 import torch
 import torch.nn.functional as F
 

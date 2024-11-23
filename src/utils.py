@@ -1,6 +1,3 @@
-# utils.py
-# location (/cluster/home/abubakb/ContMAV/src/utils.py)
-
 import os
 import sys
 

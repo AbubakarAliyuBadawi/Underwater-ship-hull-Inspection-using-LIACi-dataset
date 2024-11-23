@@ -1,6 +1,3 @@
-# train.py 
-# location (/cluster/home/abubakb/ContMAV/train.py)
-
 import argparse
 from datetime import datetime
 import json

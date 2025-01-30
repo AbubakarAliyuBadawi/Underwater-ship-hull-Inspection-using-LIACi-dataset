@@ -189,7 +189,7 @@ def train_main():
 
         # save weights
         if not args.overfit:
-            # save / overwrite latest weights (useful for resuming training)
+
             save_ckpt_every_epoch(
                 ckpt_dir, model, optimizer, epoch, best_miou, best_miou_epoch, mean, var
             )

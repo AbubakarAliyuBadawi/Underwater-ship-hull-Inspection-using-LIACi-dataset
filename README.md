@@ -34,19 +34,6 @@ The project uses the LIACI dataset from SINTEF Ocean, which includes:
 10. Corrosion
 11. Sea chest grating
 
-## Requirements
-
-```
-python>=3.8
-torch>=1.8.0
-torchvision>=0.9.0
-numpy
-opencv-python
-albumentations
-tqdm
-tensorboard
-```
-
 ## Project Structure
 
 ```
